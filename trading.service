@@ -1,0 +1,15 @@
+[Unit]
+Description=Autonomous Indian Cloud Trading Daemon (NIFTY ORB & AI Hedge Fund)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/india-trading-gcp
+ExecStart=/home/ubuntu/india-trading-gcp/venv/bin/python3 cloud_trader.py
+Restart=always
+RestartSec=10
+EnvironmentFile=/home/ubuntu/india-trading-gcp/.env
+
+[Install]
+WantedBy=multi-user.target
