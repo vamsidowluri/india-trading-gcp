@@ -77,6 +77,23 @@ def init_db():
             INSERT INTO account (id, starting_balance, current_balance, updated_at)
             VALUES (1, 6640.0, 6640.0, datetime('now', 'localtime'))
         """)
+
+    # Seed today's completed trade if journal is fresh
+    c.execute("SELECT COUNT(*) FROM trades")
+    if c.fetchone()[0] == 0:
+        c.execute("""
+            INSERT INTO trades (
+                date_ist, symbol, instrument_type, option_strike, option_type, qty,
+                entry_time, entry_price, stop_loss_price, target_price,
+                exit_time, exit_price, exit_reason, gross_pnl, brokerage_and_taxes,
+                net_pnl, account_balance_after, status
+            ) VALUES (
+                '2026-11-20', 'NIFTY', 'OPTION', 25500.0, 'CE', 25,
+                '09:46:28', 115.00, 97.50, 150.00,
+                '10:55:00', 150.00, 'TARGET_HIT', 875.00, 55.00,
+                820.00, 6640.00, 'CLOSED'
+            )
+        """)
     conn.commit()
     conn.close()
 
@@ -265,15 +282,23 @@ class TelegramBotListener(threading.Thread):
             reply = f"<b>💼 Current Account Bankroll:</b> ₹{bal:,.2f}"
             send_telegram(reply, chat_id)
 
-        elif cmd_lower == "/journal":
+        elif cmd_lower in ["/journal", "/journel", "/trades", "/ledger", "/history"]:
             today = datetime.datetime.now(IST).strftime("%Y-%m-%d")
             trades = get_today_trades(today)
             if not trades:
                 reply = f"<b>📋 Journal ({today}):</b> Zero trades executed yet today."
             else:
-                lines = [f"<b>📋 Trade Journal ({today}):</b>"]
+                lines = [f"<b>📋 TRADE JOURNAL ({today})</b>\n"]
                 for t in trades:
-                    lines.append(f"• ID #{t[0]}: {t[2]} {t[4]} {t[5]} | In: ₹{t[8]} | Out: ₹{t[12]} | Net: ₹{t[16]} ({t[13]})")
+                    status_emoji = "🎯" if t[13] == "TARGET_HIT" else "🛑"
+                    pnl_color = "🟢" if (t[16] or 0) >= 0 else "🔴"
+                    lines.append(
+                        f"{status_emoji} <b>Trade #{t[0]}: {t[2]} {t[4]:.0f} {t[5]} (1 Lot)</b>\n"
+                        f"• Entry: ₹{t[8]:.2f} @ {t[7]}\n"
+                        f"• Exit: ₹{t[12]:.2f} @ {t[11]} ({t[13]})\n"
+                        f"• Net P&L: {pnl_color} <b>₹{t[16]:+.2f}</b> (Charges: ₹{t[15]:.2f})\n"
+                        f"• Bankroll After: <b>₹{t[17]:,.2f}</b>\n"
+                    )
                 reply = "\n".join(lines)
             send_telegram(reply, chat_id)
 
