@@ -131,15 +131,53 @@ def get_today_trades(date_str: str):
 # =====================================================================
 # Telegram Dispatcher & Receiver
 # =====================================================================
-def send_telegram(text: str, chat_id: str = TELEGRAM_CHAT_ID) -> bool:
+DEFAULT_KEYBOARD = {
+    "keyboard": [
+        [{"text": "📊 Live Status"}, {"text": "🔬 Quant Simulator"}],
+        [{"text": "🏛️ AI Market View"}, {"text": "📋 Trade Journal"}],
+        [{"text": "💼 Bankroll"}, {"text": "⚡ Straddle Model"}],
+        [{"text": "🛑 Emergency Close"}]
+    ],
+    "resize_keyboard": True,
+    "persistent": True
+}
+
+def set_telegram_commands():
+    """
+    Registers the bot commands with Telegram so they appear in the '/' menu.
+    """
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setMyCommands"
+    commands = [
+        {"command": "status", "description": "📊 Live NIFTY & SENSEX Status"},
+        {"command": "quant", "description": "🔬 1,000-Run Monte Carlo Simulation"},
+        {"command": "ai_view", "description": "🏛️ AI Hedge Fund Market Analysis"},
+        {"command": "journal", "description": "📋 Trade History & Ledger"},
+        {"command": "balance", "description": "💼 Current Bankroll Balance"},
+        {"command": "straddle", "description": "⚡ Options Straddle Volatility Model"},
+        {"command": "close", "description": "🛑 Emergency Square-Off"}
+    ]
+    data = json.dumps({"commands": commands}).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", "User-Agent": "CloudTrader/2.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            logger.info("Successfully registered persistent Telegram command menu.")
+    except Exception as e:
+        logger.warning(f"Could not register Telegram commands: {e}")
+
+def send_telegram(text: str, chat_id: str = TELEGRAM_CHAT_ID, with_keyboard: bool = True) -> bool:
     if not TELEGRAM_BOT_TOKEN or not chat_id:
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = urllib.parse.urlencode({
+    params = {
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML"
-    }).encode("utf-8")
+    }
+    if with_keyboard:
+        params["reply_markup"] = json.dumps(DEFAULT_KEYBOARD)
+    payload = urllib.parse.urlencode(params).encode("utf-8")
     req = urllib.request.Request(url, data=payload, headers={"User-Agent": "CloudTrader/2.0"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -262,23 +300,13 @@ class TelegramBotListener(threading.Thread):
 
     def handle_command(self, cmd: str, chat_id: str):
         logger.info(f"Received Telegram command: {cmd}")
-        cmd_lower = cmd.lower()
-        if cmd_lower in ["/start", "/help"]:
-            reply = (
-                "<b>🤖 Welcome to CloudTrader Dual-Index Daemon (GCP)</b>\n\n"
-                "Daily Scanning: <b>NIFTY 50 + BSE SENSEX</b>\n\n"
-                "Available Commands:\n"
-                "• <b>/status</b> — Live NIFTY & SENSEX spots, active trade & P&L\n"
-                "• <b>/ai_view</b> — AI Hedge Fund dual-index market analysis\n"
-                "• <b>/quant</b> — 1,000-Run Monte Carlo risk & edge simulation\n"
-                "• <b>/straddle</b> — Options straddle volatility model check\n"
-                "• <b>/balance</b> — Current forward-test bankroll\n"
-                "• <b>/journal</b> — Review trade ledger\n"
-                "• <b>/close</b> — Emergency square-off active position\n"
-            )
+        cmd_lower = cmd.lower().strip()
+
+        if any(k in cmd_lower for k in ["/status", "status"]) or "📊" in cmd:
+            reply = self.engine.get_status_report()
             send_telegram(reply, chat_id)
 
-        elif cmd_lower in ["/quant", "/backtest", "/montecarlo"]:
+        elif any(k in cmd_lower for k in ["/quant", "quant", "backtest", "montecarlo"]) or "🔬" in cmd:
             bal = get_account_balance()
             mc = run_monte_carlo_simulation(starting_bankroll=bal, sessions_to_simulate=30, iterations=1000)
             reply = (
@@ -294,7 +322,7 @@ class TelegramBotListener(threading.Thread):
             )
             send_telegram(reply, chat_id)
 
-        elif cmd_lower == "/straddle":
+        elif any(k in cmd_lower for k in ["/straddle", "straddle"]) or "⚡" in cmd:
             n_q = fetch_live_quote("NIFTY")
             st = evaluate_straddle_setup(spot=n_q["spot"], call_premium=115.0, put_premium=115.0, expected_move_points=320.0)
             reply = (
@@ -308,11 +336,7 @@ class TelegramBotListener(threading.Thread):
             )
             send_telegram(reply, chat_id)
 
-        elif cmd_lower == "/status":
-            reply = self.engine.get_status_report()
-            send_telegram(reply, chat_id)
-
-        elif cmd_lower == "/ai_view":
+        elif any(k in cmd_lower for k in ["/ai_view", "ai_view", "ai view"]) or "🏛️" in cmd:
             n_q = fetch_live_quote("NIFTY")
             s_q = fetch_live_quote("SENSEX")
             reply = run_ai_market_evaluation(
@@ -322,12 +346,12 @@ class TelegramBotListener(threading.Thread):
             )
             send_telegram(reply, chat_id)
 
-        elif cmd_lower == "/balance":
+        elif any(k in cmd_lower for k in ["/balance", "balance", "bankroll"]) or "💼" in cmd:
             bal = get_account_balance()
             reply = f"<b>💼 Current Account Bankroll:</b> ₹{bal:,.2f}"
             send_telegram(reply, chat_id)
 
-        elif cmd_lower in ["/journal", "/journel", "/trades", "/ledger", "/history"]:
+        elif any(k in cmd_lower for k in ["/journal", "/journel", "journal", "journel", "trades", "ledger", "history"]) or "📋" in cmd:
             today = datetime.datetime.now(IST).strftime("%Y-%m-%d")
             trades = get_today_trades(today)
             if not trades:
@@ -347,12 +371,20 @@ class TelegramBotListener(threading.Thread):
                 reply = "\n".join(lines)
             send_telegram(reply, chat_id)
 
-        elif cmd_lower == "/close":
+        elif any(k in cmd_lower for k in ["/close", "close", "squareoff", "exit"]) or "🛑" in cmd:
             if self.engine.active_trade:
                 reply = self.engine.force_close_trade("MANUAL_TELEGRAM_CLOSE")
                 send_telegram(reply, chat_id)
             else:
                 send_telegram("ℹ️ No active trade currently open to close.", chat_id)
+
+        else: # /start, /help or any other message
+            reply = (
+                "<b>🤖 CloudTrader Dual-Index Bot (GCP)</b>\n\n"
+                "Daily Scanning: <b>NIFTY 50 + BSE SENSEX</b>\n\n"
+                "👉 <b>Tap any button on your screen below to interact:</b>"
+            )
+            send_telegram(reply, chat_id)
 
 
 # =====================================================================
@@ -596,6 +628,7 @@ class TradingEngine:
 
 def main():
     init_db()
+    set_telegram_commands()
     engine = TradingEngine()
     
     # Start Telegram interactive bot in background thread
