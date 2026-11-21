@@ -11,3 +11,4 @@ env.bak/
 venv.bak/
 journal.db
 .DS_Store
+tearsheet.html

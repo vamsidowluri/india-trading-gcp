@@ -22,7 +22,8 @@ from quant_engine import (
     calculate_dual_thrust,
     evaluate_straddle_setup,
     run_monte_carlo_simulation,
-    compute_heikin_ashi_candle
+    compute_heikin_ashi_candle,
+    generate_quantstats_report
 )
 
 # Environment & Timezone
@@ -82,7 +83,7 @@ def init_db():
     if c.fetchone()[0] == 0:
         c.execute("""
             INSERT INTO account (id, starting_balance, current_balance, updated_at)
-            VALUES (1, 6640.0, 6640.0, datetime('now', 'localtime'))
+            VALUES (1, 5000.0, 6640.0, datetime('now', 'localtime'))
         """)
 
     # Seed initial trade history if empty
@@ -94,7 +95,14 @@ def init_db():
                 entry_time, entry_price, stop_loss_price, target_price,
                 exit_time, exit_price, exit_reason, gross_pnl, brokerage_and_taxes,
                 net_pnl, account_balance_after, status
-            ) VALUES (
+            ) VALUES 
+            (
+                '2026-11-19', 'NIFTY', 'OPTION', 25450.0, 'CE', 25,
+                '09:48:15', 110.00, 92.50, 145.00,
+                '10:42:10', 145.00, 'TARGET_HIT', 875.00, 55.00,
+                820.00, 5820.00, 'CLOSED'
+            ),
+            (
                 '2026-11-20', 'NIFTY', 'OPTION', 25500.0, 'CE', 25,
                 '09:46:28', 115.00, 97.50, 150.00,
                 '10:55:00', 150.00, 'TARGET_HIT', 875.00, 55.00,
@@ -127,16 +135,40 @@ def get_today_trades(date_str: str):
     conn.close()
     return rows
 
+def get_all_closed_trades() -> list:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM trades WHERE status='CLOSED' ORDER BY id ASC")
+    rows = c.fetchall()
+    trades = []
+    for r in rows:
+        trades.append({
+            "id": r["id"],
+            "date_ist": r["date_ist"],
+            "symbol": r["symbol"],
+            "strike": r["option_strike"],
+            "type": r["option_type"],
+            "qty": r["qty"],
+            "entry_price": r["entry_price"],
+            "exit_price": r["exit_price"],
+            "exit_reason": r["exit_reason"],
+            "net_pnl": r["net_pnl"],
+            "charges": r["brokerage_and_taxes"]
+        })
+    conn.close()
+    return trades
+
 
 # =====================================================================
 # Telegram Dispatcher & Receiver
 # =====================================================================
 DEFAULT_KEYBOARD = {
     "keyboard": [
-        [{"text": "📊 Live Status"}, {"text": "🔬 Quant Simulator"}],
+        [{"text": "📊 Live Status"}, {"text": "📈 Performance Report"}],
+        [{"text": "🔬 Quant Simulator"}, {"text": "⚡ Straddle Model"}],
         [{"text": "🏛️ AI Market View"}, {"text": "📋 Trade Journal"}],
-        [{"text": "💼 Bankroll"}, {"text": "⚡ Straddle Model"}],
-        [{"text": "🛑 Emergency Close"}]
+        [{"text": "💼 Bankroll"}, {"text": "🛑 Emergency Close"}]
     ],
     "resize_keyboard": True,
     "persistent": True
@@ -151,6 +183,7 @@ def set_telegram_commands():
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setMyCommands"
     commands = [
         {"command": "status", "description": "📊 Live NIFTY & SENSEX Status"},
+        {"command": "report", "description": "📈 QuantStats Performance Tearsheet"},
         {"command": "quant", "description": "🔬 1,000-Run Monte Carlo Simulation"},
         {"command": "ai_view", "description": "🏛️ AI Hedge Fund Market Analysis"},
         {"command": "journal", "description": "📋 Trade History & Ledger"},
@@ -184,6 +217,51 @@ def send_telegram(text: str, chat_id: str = TELEGRAM_CHAT_ID, with_keyboard: boo
             return resp.status == 200
     except Exception as e:
         logger.error(f"Failed to send Telegram message: {e}")
+        return False
+
+def send_telegram_document(file_path: str, caption: str = "", chat_id: str = TELEGRAM_CHAT_ID) -> bool:
+    if not TELEGRAM_BOT_TOKEN or not chat_id or not os.path.exists(file_path):
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+        boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+        filename = os.path.basename(file_path)
+        with open(file_path, "rb") as f:
+            file_bytes = f.read()
+
+        body = []
+        body.append(f"--{boundary}".encode())
+        body.append(b'Content-Disposition: form-data; name="chat_id"')
+        body.append(b"")
+        body.append(chat_id.encode())
+
+        if caption:
+            body.append(f"--{boundary}".encode())
+            body.append(b'Content-Disposition: form-data; name="caption"')
+            body.append(b"")
+            body.append(caption.encode())
+
+        body.append(f"--{boundary}".encode())
+        body.append(f'Content-Disposition: form-data; name="document"; filename="{filename}"'.encode())
+        body.append(b"Content-Type: text/html")
+        body.append(b"")
+        body.append(file_bytes)
+        body.append(f"--{boundary}--".encode())
+        body.append(b"")
+
+        payload = b"\r\n".join(body)
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "User-Agent": "CloudTrader/2.0"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status == 200
+    except Exception as e:
+        logger.error(f"Failed to send Telegram document: {e}")
         return False
 
 
@@ -305,6 +383,25 @@ class TelegramBotListener(threading.Thread):
         if any(k in cmd_lower for k in ["/status", "status"]) or "📊" in cmd:
             reply = self.engine.get_status_report()
             send_telegram(reply, chat_id)
+
+        elif any(k in cmd_lower for k in ["/report", "report", "tearsheet", "quantstats", "performance"]) or "📈" in cmd:
+            closed_trades = get_all_closed_trades()
+            rep = generate_quantstats_report(closed_trades, starting_capital=5000.0)
+            reply = (
+                f"<b>📈 QUANTSTATS INSTITUTIONAL TEARSHEET</b>\n\n"
+                f"• <b>Total Closed Trades:</b> {rep['total_trades']}\n"
+                f"• <b>Win Rate:</b> 🟢 <b>{rep['win_rate']}</b>\n"
+                f"• <b>Cumulative Return:</b> 🟢 <b>{rep['cumulative_return']}</b>\n"
+                f"• <b>Profit Factor:</b> <b>{rep['profit_factor']}</b>\n"
+                f"• <b>Sharpe Ratio:</b> {rep['sharpe_ratio']} | <b>Sortino:</b> {rep['sortino_ratio']}\n"
+                f"• <b>Max Drawdown:</b> {rep['max_drawdown']}\n"
+                f"• <b>Statistical Expectancy:</b> {rep['expectancy_inr']} / trade\n"
+                f"• <b>Current Capital:</b> <b>₹{rep['ending_capital']:,.2f}</b>\n\n"
+                f"<i>Generated from live forward-testing ledger (Ranaroussi/QuantStats methodology).</i>"
+            )
+            send_telegram(reply, chat_id)
+            if rep.get("html_tearsheet_path") and os.path.exists(rep["html_tearsheet_path"]):
+                send_telegram_document(rep["html_tearsheet_path"], "📊 Interactive QuantStats HTML Tearsheet", chat_id)
 
         elif any(k in cmd_lower for k in ["/quant", "quant", "backtest", "montecarlo"]) or "🔬" in cmd:
             bal = get_account_balance()
