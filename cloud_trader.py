@@ -165,8 +165,8 @@ def get_all_closed_trades() -> list:
 # =====================================================================
 DEFAULT_KEYBOARD = {
     "keyboard": [
-        [{"text": "📊 Live Status"}, {"text": "📈 Performance Report"}],
-        [{"text": "🔬 Quant Simulator"}, {"text": "⚡ Straddle Model"}],
+        [{"text": "📊 Live Status"}, {"text": "🎯 Best Bet"}],
+        [{"text": "📈 Performance Report"}, {"text": "🔬 Quant Simulator"}],
         [{"text": "🏛️ AI Market View"}, {"text": "📋 Trade Journal"}],
         [{"text": "💼 Bankroll"}, {"text": "🛑 Emergency Close"}]
     ],
@@ -182,13 +182,13 @@ def set_telegram_commands():
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setMyCommands"
     commands = [
-        {"command": "status", "description": "📊 Live NIFTY & SENSEX Status"},
+        {"command": "status", "description": "📊 Live Multi-Index Status"},
+        {"command": "bestbet", "description": "🎯 Situational Scanner & Best Bet"},
         {"command": "report", "description": "📈 QuantStats Performance Tearsheet"},
         {"command": "quant", "description": "🔬 1,000-Run Monte Carlo Simulation"},
         {"command": "ai_view", "description": "🏛️ AI Hedge Fund Market Analysis"},
         {"command": "journal", "description": "📋 Trade History & Ledger"},
         {"command": "balance", "description": "💼 Current Bankroll Balance"},
-        {"command": "straddle", "description": "⚡ Options Straddle Volatility Model"},
         {"command": "close", "description": "🛑 Emergency Square-Off"}
     ]
     data = json.dumps({"commands": commands}).encode("utf-8")
@@ -266,10 +266,47 @@ def send_telegram_document(file_path: str, caption: str = "", chat_id: str = TEL
 
 
 # =====================================================================
-# Market Data Feed (Dual Ticker: NIFTY 50 & BSE SENSEX)
+# Market Data Feed (Multi-Index: NIFTY 50, BANKNIFTY, BSE SENSEX)
 # =====================================================================
+INSTRUMENTS = {
+    "NIFTY": {
+        "ticker": "%5ENSEI",
+        "name": "NIFTY 50",
+        "lot_size": 25,
+        "strike_step": 50.0,
+        "est_premium": 115.0,
+        "stop_loss_pts": 17.5,
+        "target_pts": 35.0,
+        "expiry_day": 3,
+        "default_spot": 25800.0
+    },
+    "BANKNIFTY": {
+        "ticker": "%5ENSEBANK",
+        "name": "BANKNIFTY",
+        "lot_size": 15,
+        "strike_step": 100.0,
+        "est_premium": 190.0,
+        "stop_loss_pts": 35.0,
+        "target_pts": 70.0,
+        "expiry_day": 2,
+        "default_spot": 64600.0
+    },
+    "SENSEX": {
+        "ticker": "%5EBSESN",
+        "name": "BSE SENSEX",
+        "lot_size": 20,
+        "strike_step": 100.0,
+        "est_premium": 220.0,
+        "stop_loss_pts": 40.0,
+        "target_pts": 80.0,
+        "expiry_day": 4,
+        "default_spot": 83900.0
+    }
+}
+
 def fetch_live_quote(symbol: str = "NIFTY") -> Dict[str, Any]:
-    ticker = "%5ENSEI" if symbol == "NIFTY" else "%5EBSESN"
+    cfg = INSTRUMENTS.get(symbol, INSTRUMENTS["NIFTY"])
+    ticker = cfg["ticker"]
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1m&range=1d"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
@@ -291,16 +328,150 @@ def fetch_live_quote(symbol: str = "NIFTY") -> Dict[str, Any]:
             }
     except Exception as e:
         logger.warning(f"Live feed fetch error on {symbol}: {e}")
-        default_spot = 25520.0 if symbol == "NIFTY" else 83900.0
+        default_spot = cfg["default_spot"]
         return {
             "symbol": symbol,
             "spot": default_spot,
-            "day_high": default_spot + 50.0,
-            "day_low": default_spot - 100.0,
+            "day_high": default_spot + 60.0,
+            "day_low": default_spot - 80.0,
             "prev_close": default_spot - 20.0,
             "change": 20.0,
             "time": datetime.datetime.now(IST).strftime("%H:%M:%S")
         }
+
+
+# =====================================================================
+# Situational Market Scanner & Best Bet Selector
+# =====================================================================
+def evaluate_situational_scanner() -> Dict[str, Any]:
+    """
+    Evaluates NIFTY, BANKNIFTY, and SENSEX to rank which index offers the highest-probability
+    bet of the day, filtering out chop, low liquidity, and conflicting signals.
+    """
+    now = datetime.datetime.now(IST)
+    weekday = now.weekday()
+    day_name = now.strftime("%A")
+
+    expiry_map = {
+        0: "MIDCPNIFTY Weekly Expiry",
+        1: "FINNIFTY Weekly Expiry",
+        2: "BANKNIFTY Weekly Expiry",
+        3: "NIFTY 50 Weekly Expiry",
+        4: "BSE SENSEX Weekly Expiry",
+        5: "Weekend (Closed)",
+        6: "Weekend (Closed)"
+    }
+    today_expiry_note = expiry_map.get(weekday, "Regular Trading Session")
+
+    details = {}
+    for sym, cfg in INSTRUMENTS.items():
+        q = fetch_live_quote(sym)
+        spot = q["spot"]
+        high = q["day_high"]
+        low = q["day_low"]
+        prev_close = q["prev_close"]
+        rng = high - low
+        rng_pct = (rng / spot) * 100.0 if spot > 0 else 0.0
+        pos = ((spot - low) / rng) * 100.0 if rng > 0 else 50.0
+        change_pct = ((spot - prev_close) / prev_close) * 100.0 if prev_close > 0 else 0.0
+
+        score = 20.0 if sym in ["NIFTY", "BANKNIFTY"] else 10.0
+        score += min(abs(change_pct) * 15.0, 35.0)
+        if rng_pct >= 0.8:
+            score += 15.0
+
+        if pos >= 80.0:
+            bias = "BULLISH (Call Setup)"
+            bias_type = "CE"
+            strike = round(spot / cfg["strike_step"]) * cfg["strike_step"]
+            conviction = "Strong upward pressure near session high"
+            score += 25.0
+        elif pos <= 20.0:
+            bias = "BEARISH (Put Setup)"
+            bias_type = "PE"
+            strike = round(spot / cfg["strike_step"]) * cfg["strike_step"]
+            conviction = "Heavy downward pressure near session low"
+            score += 25.0
+        elif 40.0 <= pos <= 60.0:
+            bias = "CHOP / SIDEWAYS"
+            bias_type = "NONE"
+            strike = 0
+            conviction = "Trapped in dead center of range (high risk of whip)"
+            score -= 25.0
+        else:
+            bias = "NEUTRAL"
+            bias_type = "CE" if change_pct >= 0 else "PE"
+            strike = round(spot / cfg["strike_step"]) * cfg["strike_step"]
+            conviction = "Mild directional bias, awaiting range breakout"
+            score += 5.0
+
+        if cfg["expiry_day"] == weekday:
+            score += 15.0
+            conviction += f" (🔥 Today is {sym} Expiry Day!)"
+
+        details[sym] = {
+            "symbol": sym,
+            "spot": spot,
+            "high": high,
+            "low": low,
+            "change_pct": change_pct,
+            "pos": pos,
+            "score": score,
+            "bias": bias,
+            "bias_type": bias_type,
+            "strike": strike,
+            "conviction": conviction,
+            "lot_size": cfg["lot_size"],
+            "est_premium": cfg["est_premium"],
+            "stop_pts": cfg["stop_loss_pts"],
+            "target_pts": cfg["target_pts"]
+        }
+
+    ranked = sorted(details.values(), key=lambda x: x["score"], reverse=True)
+    top_pick = ranked[0]
+    runner_up = ranked[1]
+    avoid_or_laggard = ranked[2]
+
+    lines = [
+        f"<b>🎯 SITUATIONAL SCANNER & BEST BET ({day_name})</b>",
+        f"📅 <b>Market Context:</b> {today_expiry_note}\n"
+    ]
+
+    if top_pick["score"] >= 40.0 and top_pick["bias_type"] != "NONE":
+        lines.append(
+            f"🥇 <b>TOP PICK (Best Bet): {top_pick['symbol']}</b>\n"
+            f"• <b>Conviction:</b> {top_pick['conviction']}\n"
+            f"• <b>Recommended Trade:</b> Buy <b>{top_pick['symbol']} {top_pick['strike']:.0f} {top_pick['bias_type']}</b>\n"
+            f"• <b>Current Spot:</b> {top_pick['spot']:.1f} ({top_pick['change_pct']:+.2f}%)\n"
+            f"• <b>Position Size:</b> 1 Lot ({top_pick['lot_size']} Qty)\n"
+            f"• <b>Est. Entry:</b> ~₹{top_pick['est_premium']:.0f} | <b>Stop:</b> -{top_pick['stop_pts']:.0f} pts | <b>Target:</b> +{top_pick['target_pts']:.0f} pts\n"
+        )
+    else:
+        lines.append(
+            f"🛡️ <b>TOP STATUS: CAPITAL PRESERVATION</b>\n"
+            f"• Market is in choppy rangebound consolidation.\n"
+            f"• Zero high-probability edge detected — avoiding forced trades.\n"
+        )
+
+    lines.append(
+        f"🥈 <b>Runner-up: {runner_up['symbol']}</b> ({runner_up['change_pct']:+.2f}%)\n"
+        f"• Status: {runner_up['bias']} (Score: {runner_up['score']:.0f}/100)\n"
+    )
+
+    avoid_reason = "Trapped in chop" if avoid_or_laggard["bias_type"] == "NONE" else f"Lagging leader {top_pick['symbol']}; lower relative momentum"
+    lines.append(
+        f"⚠️ <b>Avoid / Laggard: {avoid_or_laggard['symbol']}</b> ({avoid_or_laggard['change_pct']:+.2f}%)\n"
+        f"• Reason: {avoid_reason}\n"
+    )
+
+    lines.append("<i>Strict 1 trade/day rule applies only to the #1 Best Bet setup.</i>")
+
+    return {
+        "top_pick": top_pick,
+        "runner_up": runner_up,
+        "ranked": ranked,
+        "report_text": "\n".join(lines)
+    }
 
 
 # =====================================================================
@@ -383,6 +554,10 @@ class TelegramBotListener(threading.Thread):
         if any(k in cmd_lower for k in ["/status", "status"]) or "📊" in cmd:
             reply = self.engine.get_status_report()
             send_telegram(reply, chat_id)
+
+        elif any(k in cmd_lower for k in ["/bestbet", "bestbet", "best bet", "scan", "scanner"]) or "🎯" in cmd:
+            scan_res = evaluate_situational_scanner()
+            send_telegram(scan_res["report_text"], chat_id)
 
         elif any(k in cmd_lower for k in ["/report", "report", "tearsheet", "quantstats", "performance"]) or "📈" in cmd:
             closed_trades = get_all_closed_trades()
@@ -485,30 +660,30 @@ class TelegramBotListener(threading.Thread):
 
 
 # =====================================================================
-# Dual-Index Core Trading Engine Daemon
+# Situational Core Trading Engine Daemon
 # =====================================================================
 class TradingEngine:
     def __init__(self):
-        # NIFTY defaults
-        self.nifty_range_high = 25491.25
-        self.nifty_range_low = 25345.20
-        # SENSEX defaults
-        self.sensex_range_high = 84037.96
-        self.sensex_range_low = 82403.27
-
+        self.ranges = {
+            "NIFTY": {"high": 25808.8, "low": 25345.2},
+            "BANKNIFTY": {"high": 64680.8, "low": 62598.5},
+            "SENSEX": {"high": 84037.9, "low": 82403.2}
+        }
         self.range_locked = False
+        self.best_bet = None
+        self.best_bet_bias = "NONE"
         self.active_trade = None
         self.trades_today_count = 0
         self.last_pulse_time = 0
 
     def get_status_report(self) -> str:
-        n_q = fetch_live_quote("NIFTY")
-        s_q = fetch_live_quote("SENSEX")
+        quotes = {sym: fetch_live_quote(sym) for sym in ["NIFTY", "BANKNIFTY", "SENSEX"]}
 
         if self.active_trade:
             t = self.active_trade
-            ref_quote = n_q if t["symbol"] == "NIFTY" else s_q
-            current_est = t["entry_price"] + ((ref_quote["spot"] - t["entry_spot"]) * 0.5)
+            ref_quote = quotes.get(t["symbol"], quotes["NIFTY"])
+            spot_diff = (ref_quote["spot"] - t["entry_spot"]) if t["type"] == "CE" else (t["entry_spot"] - ref_quote["spot"])
+            current_est = t["entry_price"] + (spot_diff * 0.5)
             pnl = (current_est - t["entry_price"]) * t["qty"]
             color = "🟢" if pnl >= 0 else "🔴"
             return (
@@ -523,13 +698,14 @@ class TradingEngine:
                 f"<b>Status:</b> IN PLAY"
             )
         else:
+            best_bet_str = f"<b>{self.best_bet}</b> ({self.best_bet_bias})" if self.best_bet else "Scanning field at 09:30 AM"
             return (
-                f"<b>📊 DUAL MARKET STATUS (IDLE)</b>\n\n"
-                f"<b>🟢 NIFTY 50:</b> {n_q['spot']:.2f} ({n_q['change']:+.2f})\n"
-                f"  • Range: {self.nifty_range_low:.2f} – {self.nifty_range_high:.2f}\n\n"
-                f"<b>🟢 BSE SENSEX:</b> {s_q['spot']:.2f} ({s_q['change']:+.2f})\n"
-                f"  • Range: {self.sensex_range_low:.2f} – {self.sensex_range_high:.2f}\n\n"
-                f"<b>Active Trades:</b> None (Scanning both for breakout)\n"
+                f"<b>📊 MULTI-INDEX SITUATIONAL STATUS (IDLE)</b>\n\n"
+                f"• <b>🟢 NIFTY 50:</b> {quotes['NIFTY']['spot']:.2f} ({quotes['NIFTY']['change']:+.2f})\n"
+                f"• <b>🟢 BANKNIFTY:</b> {quotes['BANKNIFTY']['spot']:.2f} ({quotes['BANKNIFTY']['change']:+.2f})\n"
+                f"• <b>🟢 BSE SENSEX:</b> {quotes['SENSEX']['spot']:.2f} ({quotes['SENSEX']['change']:+.2f})\n\n"
+                f"<b>Today's Selected Best Bet:</b> {best_bet_str}\n"
+                f"<b>Active Trades:</b> None (1 trade/day discipline)\n"
                 f"<b>Bankroll:</b> ₹{get_account_balance():,.2f}"
             )
 
@@ -538,7 +714,8 @@ class TradingEngine:
             return "No active trade."
         t = self.active_trade
         ref_quote = fetch_live_quote(t["symbol"])
-        exit_price = t["entry_price"] + ((ref_quote["spot"] - t["entry_spot"]) * 0.5)
+        spot_diff = (ref_quote["spot"] - t["entry_spot"]) if t["type"] == "CE" else (t["entry_spot"] - ref_quote["spot"])
+        exit_price = t["entry_price"] + (spot_diff * 0.5)
         gross_pnl = (exit_price - t["entry_price"]) * t["qty"]
         net_pnl = gross_pnl - 55.0
         new_balance = get_account_balance() + net_pnl
@@ -565,22 +742,14 @@ class TradingEngine:
         )
 
     def trigger_trade(self, symbol: str, option_type: str, spot: float, now_ist):
-        if symbol == "NIFTY":
-            strike = round(spot / 50.0) * 50.0
-            qty = 25
-            entry_price = 115.00
-            stop_loss = 97.50
-            target = 150.00
-            index_stop_distance = 58.0
-            index_target_distance = 47.0
-        else: # SENSEX
-            strike = round(spot / 100.0) * 100.0
-            qty = 20
-            entry_price = 220.00
-            stop_loss = 180.00
-            target = 300.00
-            index_stop_distance = 180.0
-            index_target_distance = 160.0
+        cfg = INSTRUMENTS.get(symbol, INSTRUMENTS["NIFTY"])
+        strike = round(spot / cfg["strike_step"]) * cfg["strike_step"]
+        qty = cfg["lot_size"]
+        entry_price = cfg["est_premium"]
+        stop_loss = entry_price - cfg["stop_loss_pts"]
+        target = entry_price + cfg["target_pts"]
+        index_stop_distance = cfg["stop_loss_pts"] * 2.0
+        index_target_distance = cfg["target_pts"] * 2.0
 
         today = now_ist.strftime("%Y-%m-%d")
         time_str = now_ist.strftime("%H:%M:%S")
@@ -611,27 +780,25 @@ class TradingEngine:
         self.trades_today_count += 1
 
         msg = (
-            f"<b>⚡ {symbol} BREAKOUT TRIGGERED! BUY {option_type}</b>\n\n"
+            f"<b>⚡ {symbol} BEST-BET TRIGGERED! BUY {option_type}</b>\n\n"
             f"<b>Contract:</b> {symbol} {strike:.0f} {option_type} ({qty} Qty)\n"
             f"<b>Entry:</b> ₹{entry_price:.2f} (Spot: {spot:.2f})\n"
             f"<b>🛡️ Stop Loss (-1R):</b> ₹{stop_loss:.2f}\n"
             f"<b>🎯 Target (+2R):</b> ₹{target:.2f}\n\n"
-            f"<i>Strict 1 trade/day discipline. Daily quota filled!</i>"
+            f"<i>Execution restricted strictly to today's #1 Best Bet setup. Daily quota filled!</i>"
         )
         send_telegram(msg)
 
     def run(self):
-        logger.info("Dual-Index Trading engine loop initiated on GCP.")
+        logger.info("Situational Multi-Index Trading engine loop initiated on GCP.")
         send_telegram(
-            "🚀 <b>CloudTrader Dual-Index Daemon Online!</b>\n"
-            "Scanning <b>NIFTY 50 + BSE SENSEX</b> daily with strict 1:2 R:R."
+            "🚀 <b>CloudTrader Situational Daemon Online!</b>\n"
+            "Scanning <b>NIFTY 50, BANKNIFTY & BSE SENSEX</b> for highest-conviction Best Bet."
         )
 
         while True:
             try:
                 now_ist = datetime.datetime.now(IST)
-                n_q = fetch_live_quote("NIFTY")
-                s_q = fetch_live_quote("SENSEX")
                 current_time_str = now_ist.strftime("%H:%M")
 
                 # Weekend check
@@ -639,51 +806,53 @@ class TradingEngine:
                     time.sleep(300)
                     continue
 
-                # 09:30 AM Range Lock (Both NIFTY & SENSEX)
+                # 09:30 AM Range Lock & Situational Scanner
                 if current_time_str == "09:30" and not self.range_locked:
-                    self.nifty_range_high = n_q["day_high"]
-                    self.nifty_range_low = n_q["day_low"]
-                    self.sensex_range_high = s_q["day_high"]
-                    self.sensex_range_low = s_q["day_low"]
+                    quotes = {sym: fetch_live_quote(sym) for sym in ["NIFTY", "BANKNIFTY", "SENSEX"]}
+                    for sym in quotes:
+                        self.ranges[sym] = {
+                            "high": quotes[sym]["day_high"],
+                            "low": quotes[sym]["day_low"]
+                        }
                     self.range_locked = True
 
-                    msg = (
-                        f"<b>🔒 15-MIN DUAL RANGES LOCKED (09:30 AM IST)</b>\n\n"
-                        f"<b>1. NIFTY 50 ({n_q['spot']:.1f}):</b>\n"
-                        f"• High (CE Trigger): <b>{self.nifty_range_high:.2f}</b>\n"
-                        f"• Low (PE Trigger): <b>{self.nifty_range_low:.2f}</b>\n\n"
-                        f"<b>2. BSE SENSEX ({s_q['spot']:.1f}):</b>\n"
-                        f"• High (CE Trigger): <b>{self.sensex_range_high:.2f}</b>\n"
-                        f"• Low (PE Trigger): <b>{self.sensex_range_low:.2f}</b>\n\n"
-                        f"<i>Scanning both live. First confirmed breakout triggers!</i>"
-                    )
-                    send_telegram(msg)
+                    # Run Situational Best-Bet Evaluation
+                    scan = evaluate_situational_scanner()
+                    top = scan["top_pick"]
+                    if top["score"] >= 40.0 and top["bias_type"] in ["CE", "PE"]:
+                        self.best_bet = top["symbol"]
+                        self.best_bet_bias = top["bias_type"]
+                    else:
+                        self.best_bet = None
+                        self.best_bet_bias = "NONE"
+
+                    send_telegram(scan["report_text"])
 
                 # Reset at midnight
                 if current_time_str == "00:01":
                     self.range_locked = False
+                    self.best_bet = None
+                    self.best_bet_bias = "NONE"
                     self.trades_today_count = 0
 
-                # Breakout Detection on BOTH Indices (09:30 to 15:00)
+                # Breakout Detection STRICTLY on the #1 Best Bet (09:30 to 15:00)
                 if self.range_locked and not self.active_trade and self.trades_today_count == 0:
-                    if "09:30" <= current_time_str <= "15:00":
-                        # 1. Check NIFTY Breakout
-                        if n_q["spot"] > self.nifty_range_high:
-                            self.trigger_trade("NIFTY", "CE", n_q["spot"], now_ist)
-                        elif n_q["spot"] < self.nifty_range_low:
-                            self.trigger_trade("NIFTY", "PE", n_q["spot"], now_ist)
+                    if "09:30" <= current_time_str <= "15:00" and self.best_bet and self.best_bet_bias != "NONE":
+                        bb_sym = self.best_bet
+                        bb_q = fetch_live_quote(bb_sym)
+                        bb_high = self.ranges.get(bb_sym, {}).get("high", bb_q["day_high"])
+                        bb_low = self.ranges.get(bb_sym, {}).get("low", bb_q["day_low"])
 
-                        # 2. Check SENSEX Breakout
-                        elif s_q["spot"] > self.sensex_range_high:
-                            self.trigger_trade("SENSEX", "CE", s_q["spot"], now_ist)
-                        elif s_q["spot"] < self.sensex_range_low:
-                            self.trigger_trade("SENSEX", "PE", s_q["spot"], now_ist)
+                        if self.best_bet_bias == "CE" and bb_q["spot"] > bb_high:
+                            self.trigger_trade(bb_sym, "CE", bb_q["spot"], now_ist)
+                        elif self.best_bet_bias == "PE" and bb_q["spot"] < bb_low:
+                            self.trigger_trade(bb_sym, "PE", bb_q["spot"], now_ist)
 
                 # Active Trade Management
                 if self.active_trade:
                     t = self.active_trade
-                    ref_q = n_q if t["symbol"] == "NIFTY" else s_q
-                    
+                    ref_q = fetch_live_quote(t["symbol"])
+
                     if t["type"] == "CE":
                         spot_move = ref_q["spot"] - t["entry_spot"]
                     else:
