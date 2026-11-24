@@ -12,3 +12,4 @@ venv.bak/
 journal.db
 .DS_Store
 tearsheet.html
+live_state.json

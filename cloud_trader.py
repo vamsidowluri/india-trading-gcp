@@ -13,6 +13,7 @@ import sqlite3
 import logging
 import threading
 import datetime
+import subprocess
 import urllib.request
 import urllib.parse
 from zoneinfo import ZoneInfo
@@ -39,6 +40,24 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "9283081811:AAF-jSS59rMDc-s
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "7590687240")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "journal.db")
+GCS_BUCKET_NAME = "gen-lang-client-0015772649-trading-state"
+
+NSE_HOLIDAYS_2026 = {
+    "2026-01-26": "Republic Day",
+    "2026-03-03": "Holi",
+    "2026-03-20": "Id-Ul-Fitr (Ramzan Id)",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-05-27": "Bakri Id (Id-Ul-Zuha)",
+    "2026-08-15": "Independence Day",
+    "2026-08-26": "Milad-un-Nabi",
+    "2026-10-02": "Mahatma Gandhi Jayanti",
+    "2026-10-20": "Dussehra",
+    "2026-11-10": "Diwali-Balipratipada",
+    "2026-11-24": "Guru Nanak Jayanti",
+    "2026-12-25": "Christmas"
+}
 
 
 # =====================================================================
@@ -83,7 +102,7 @@ def init_db():
     if c.fetchone()[0] == 0:
         c.execute("""
             INSERT INTO account (id, starting_balance, current_balance, updated_at)
-            VALUES (1, 5000.0, 6640.0, datetime('now', 'localtime'))
+            VALUES (1, 5000.0, 7732.0, datetime('now', 'localtime'))
         """)
 
     # Seed initial trade history if empty
@@ -107,6 +126,12 @@ def init_db():
                 '09:46:28', 115.00, 97.50, 150.00,
                 '10:55:00', 150.00, 'TARGET_HIT', 875.00, 55.00,
                 820.00, 6640.00, 'CLOSED'
+            ),
+            (
+                '2026-11-23', 'BANKNIFTY', 'OPTION', 64600.0, 'CE', 15,
+                '09:47:10', 190.00, 155.00, 270.00,
+                '11:15:30', 270.00, 'TARGET_HIT', 1200.00, 108.00,
+                1092.00, 7732.00, 'CLOSED'
             )
         """)
     conn.commit()
@@ -118,7 +143,7 @@ def get_account_balance() -> float:
     c.execute("SELECT current_balance FROM account WHERE id=1")
     row = c.fetchone()
     conn.close()
-    return row[0] if row else 6640.0
+    return row[0] if row else 7732.0
 
 def update_account_balance(new_balance: float):
     conn = sqlite3.connect(DB_PATH)
@@ -126,6 +151,7 @@ def update_account_balance(new_balance: float):
     c.execute("UPDATE account SET current_balance = ?, updated_at = datetime('now', 'localtime') WHERE id=1", (new_balance,))
     conn.commit()
     conn.close()
+    publish_gcs_state(bankroll=new_balance)
 
 def get_today_trades(date_str: str):
     conn = sqlite3.connect(DB_PATH)
@@ -158,6 +184,41 @@ def get_all_closed_trades() -> list:
         })
     conn.close()
     return trades
+
+def publish_gcs_state(bankroll: Optional[float] = None, active_trade: Optional[Dict[str, Any]] = None, status: str = "IDLE"):
+    """
+    Publishes live trading state and bankroll to Google Cloud Storage (GCS) single source of truth.
+    """
+    try:
+        current_bal = bankroll if bankroll is not None else get_account_balance()
+        now_str = datetime.datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        closed_trades = get_all_closed_trades()
+        win_count = len([t for t in closed_trades if t.get("net_pnl", 0) > 0])
+        total_trades = len(closed_trades)
+        win_rate = f"{(win_count / total_trades * 100.0):.1f}%" if total_trades > 0 else "0.0%"
+        cum_ret = f"{((current_bal - 5000.0) / 5000.0 * 100.0):+.1f}%"
+
+        state_data = {
+            "bankroll": current_bal,
+            "starting_capital": 5000.0,
+            "total_trades": total_trades,
+            "win_rate": win_rate,
+            "cumulative_return": cum_ret,
+            "status": status,
+            "active_trade": active_trade,
+            "last_updated_ist": now_str
+        }
+        state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_state.json")
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump(state_data, f, indent=2)
+
+        def _upload():
+            cmd = f"gcloud storage cp {state_file} gs://{GCS_BUCKET_NAME}/live_state.json || gsutil cp {state_file} gs://{GCS_BUCKET_NAME}/live_state.json"
+            subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        threading.Thread(target=_upload, daemon=True).start()
+    except Exception as e:
+        logger.warning(f"Could not publish GCS state: {e}")
 
 
 # =====================================================================
@@ -733,6 +794,7 @@ class TradingEngine:
         conn.close()
 
         self.active_trade = None
+        publish_gcs_state(bankroll=new_balance, active_trade=None, status="IDLE")
         return (
             f"<b>🚨 TRADE CLOSED ({reason})</b>\n\n"
             f"<b>Instrument:</b> {t['symbol']} {t['strike']:.0f} {t['type']}\n"
@@ -778,6 +840,7 @@ class TradingEngine:
             "index_target_distance": index_target_distance
         }
         self.trades_today_count += 1
+        publish_gcs_state(active_trade=self.active_trade, status="IN_PLAY")
 
         msg = (
             f"<b>⚡ {symbol} BEST-BET TRIGGERED! BUY {option_type}</b>\n\n"
@@ -791,6 +854,7 @@ class TradingEngine:
 
     def run(self):
         logger.info("Situational Multi-Index Trading engine loop initiated on GCP.")
+        publish_gcs_state(status="ONLINE")
         send_telegram(
             "🚀 <b>CloudTrader Situational Daemon Online!</b>\n"
             "Scanning <b>NIFTY 50, BANKNIFTY & BSE SENSEX</b> for highest-conviction Best Bet."
@@ -800,9 +864,22 @@ class TradingEngine:
             try:
                 now_ist = datetime.datetime.now(IST)
                 current_time_str = now_ist.strftime("%H:%M")
+                today_date_str = now_ist.strftime("%Y-%m-%d")
 
                 # Weekend check
                 if now_ist.weekday() in [5, 6]:
+                    time.sleep(300)
+                    continue
+
+                # NSE Official Holiday check
+                if today_date_str in NSE_HOLIDAYS_2026:
+                    holiday_name = NSE_HOLIDAYS_2026[today_date_str]
+                    if current_time_str == "09:00":
+                        send_telegram(
+                            f"🏖️ <b>NSE / BSE MARKET HOLIDAY TODAY</b>\n\n"
+                            f"Exchange is closed for <b>{holiday_name}</b>. Bot is resting.\n"
+                            f"Next trading session resumes tomorrow at 09:15 AM."
+                        )
                     time.sleep(300)
                     continue
 
